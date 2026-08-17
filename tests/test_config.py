@@ -32,6 +32,13 @@ def test_default_retention_is_30_days(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Settings.from_env().retention_days == 30
 
 
+def test_default_max_timeout_is_240_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SANDBOX_MAX_TIMEOUT_SECONDS", raising=False)
+
+    assert Settings().max_timeout_seconds == 240
+    assert Settings.from_env().max_timeout_seconds == 240
+
+
 def test_default_data_directory_is_absolute_project_data_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

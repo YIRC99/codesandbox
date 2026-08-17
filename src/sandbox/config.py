@@ -24,7 +24,7 @@ class Settings:
     max_upload_bytes: int = 10 * 1024 * 1024
     max_data_file_bytes: int = 100 * 1024 * 1024
     max_output_bytes: int = 10 * 1024 * 1024
-    max_timeout_seconds: int = 60
+    max_timeout_seconds: int = 240
     max_concurrent: int = 4
     max_waiting: int = 20
     queue_wait_seconds: float = 5.0
@@ -73,7 +73,7 @@ class Settings:
             max_upload_bytes=_env_int("SANDBOX_MAX_UPLOAD_BYTES", 10 * 1024 * 1024),
             max_data_file_bytes=_env_int("SANDBOX_MAX_DATA_FILE_BYTES", 100 * 1024 * 1024),
             max_output_bytes=_env_int("SANDBOX_MAX_OUTPUT_BYTES", 10 * 1024 * 1024),
-            max_timeout_seconds=_env_int("SANDBOX_MAX_TIMEOUT_SECONDS", 60),
+            max_timeout_seconds=_env_int("SANDBOX_MAX_TIMEOUT_SECONDS", 240),
             max_concurrent=_env_int("SANDBOX_MAX_CONCURRENT", 4),
             max_waiting=_env_int("SANDBOX_MAX_WAITING", 20),
             queue_wait_seconds=_env_float("SANDBOX_QUEUE_WAIT_SECONDS", 5.0),

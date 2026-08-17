@@ -124,7 +124,7 @@ sys.argv.append(str(signals_manifest_file))
 | `SANDBOX_MAX_UPLOAD_BYTES` | `10485760` | 单文件最大字节数 |
 | `SANDBOX_MAX_DATA_FILE_BYTES` | `104857600` | 单个 CSV 数据文件最大字节数 |
 | `SANDBOX_MAX_OUTPUT_BYTES` | `10485760` | stdout、stderr 各自最多保留的字节数 |
-| `SANDBOX_MAX_TIMEOUT_SECONDS` | `60` | 调用方可请求的最大超时 |
+| `SANDBOX_MAX_TIMEOUT_SECONDS` | `240` | 调用方可请求的最大超时 |
 | `SANDBOX_MAX_CONCURRENT` | `4` | 每个 Pod 同时运行的脚本数 |
 | `SANDBOX_MAX_WAITING` | `20` | 每个 Pod 等待队列长度 |
 | `SANDBOX_QUEUE_WAIT_SECONDS` | `5` | 等待执行槽的最长时间 |
