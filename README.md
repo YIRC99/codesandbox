@@ -152,14 +152,16 @@ dev、test 和 prod 清单分别位于 `k8s/overlays/dev`、`k8s/overlays/test` 
 
 Deployment 固定为一个副本并采用 `Recreate` 更新策略。代码上传目录、行情 CSV 上传目录和执行临时目录分别使用带容量限制的 `emptyDir`，不会挂载到包含镜像内置测试 CSV 的 `/app/data`。不需要 PVC；Pod 重启或重新部署后，上传文件会丢失，这是预期行为，AI 端可重新上传。`Recreate` 会让更新过程出现短暂中断，但能避免新旧 Pod 同时存在时上传和执行请求落到不同 Pod。
 
-生产环境必须先创建 `code-sandbox-secret`，prod 清单会强制读取其中的 `api-key`，Secret 或字段缺失时 Pod 不会启动。AI 生产 workload 也必须通过 Kubernetes Secret 注入相同的 `CODE_SANDBOX_API_KEY`，不要把生产密钥放进 ConfigMap。AI 生产 ConfigMap `yntrust-yunnan-agent-prod` 需要显式配置 `CODE_SANDBOX_BASE_URL=http://code-sandbox.yntrust-prod.svc:32004` 和 `CODE_SANDBOX_MAX_EXECUTION_SECONDS=240`；沙箱 Jenkins 会校验这两个非敏感值，并对 Secret 数据做不可逆摘要比对，不解码或打印密钥。dev/test 清单仍允许 Secret 不存在，此时业务接口不会鉴权。示例：
+生产环境必须先创建 `code-sandbox-secret`，prod 清单会强制读取其中的 `api-key`，Secret 或字段缺失时流水线会在修改工作负载前停止。密钥只保存在 Kubernetes Secret 中，不要写入 ConfigMap、仓库或构建日志。调用方如何引用该 Secret 属于调用方自己的部署配置，不是本项目发布的前置依赖。dev/test 清单仍允许 Secret 不存在，此时业务接口不会鉴权。示例：
 
 ```bash
-kubectl create namespace yntrust-dev --dry-run=client -o yaml | kubectl apply -f -
-kubectl create secret generic code-sandbox-secret \
+kubectl --kubeconfig <prod-kubeconfig> --namespace yntrust-prod \
+  create secret generic code-sandbox-secret \
   --from-literal=api-key='replace-with-a-long-random-value' \
-  -n yntrust-dev
-kubectl apply -k k8s/overlays/dev
+  --dry-run=client -o yaml | \
+kubectl --kubeconfig <prod-kubeconfig> --namespace yntrust-prod apply -f -
+kubectl --kubeconfig <prod-kubeconfig> --namespace yntrust-prod \
+  apply -k k8s/overlays/prod
 ```
 
 Kubernetes 清单默认禁止 Pod 主动访问外网；如果回测代码需要通过 `yfinance` 或 HTTP 获取行情，必须由运维按允许的目标地址调整或移除 `network-policy.yaml`，不能直接开放任意出口。
@@ -172,9 +174,9 @@ Kubernetes 清单默认禁止 Pod 主动访问外网；如果回测代码需要�
 - dev/test Kubeconfig 凭据 ID：`c397a5b5-bc78-4749-b03c-823eddb4aece`
 - prod Kubeconfig 凭据 ID：`lingneng-multi-agent-kubeconfig-prod`
 
-分支与环境固定映射为 `dev → dev`、`test → test`、`main → prod`，Jenkins Job 名的 `-dev`、`-test`、`-prod` 后缀必须与分支严格一致。生产镜像使用 `prod-<完整 Git SHA>`，通过 rollout 和集群内 `/health` 后才推送 `prod-latest`；生产发布还会校验目标集群 UID、内部调用地址和 240 秒超时。任何阶段失败都会停止部署，并恢复发布前的 Deployment revision、ConfigMap、Service、ServiceAccount 和 NetworkPolicy；首次发布失败时删除本次新建的对应资源。
+分支与环境固定映射为 `dev → dev`、`test → test`、`main → prod`，Jenkins Job 名的 `-dev`、`-test`、`-prod` 后缀必须与分支严格一致。生产镜像使用 `prod-<完整 Git SHA>`，通过 rollout 和集群内 `/health` 后才推送 `prod-latest`；生产发布还会校验目标集群 UID、Secret 和 ClusterIP 边界。任何阶段失败都会停止部署，并恢复发布前的 Deployment、ConfigMap、Service、ServiceAccount 和 NetworkPolicy；首次发布失败时删除本次新建的对应资源。
 
-首次生产发布顺序固定为：先在 `yntrust-prod` 创建共享 `code-sandbox-secret/api-key`，再把 AI 生产 ConfigMap 的沙箱地址和超时改为上述生产值并发布 AI main，最后发布沙箱 main。沙箱流水线会在停止旧 Pod 前确认线上 AI Deployment 已引用同一个 Secret/key、运行中 Pod 已加载当前 Secret 和 ConfigMap 摘要，并从 AI 运行时接口核对实际生效的生产地址；顺序不对会直接停止，不会带着 401 或旧超时风险继续发布。
+首次生产发布只需先在 `yntrust-prod` 创建 `code-sandbox-secret/api-key`，再运行固定 `main` 分支的 prod Job。流水线只检查并发布本项目资源，不读取或修改其他项目的 Deployment、ConfigMap 或 Service。
 
 ## 安全边界
 

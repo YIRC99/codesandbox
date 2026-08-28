@@ -57,13 +57,6 @@ pipeline {
         SERVICE_ACCOUNT        = 'code-sandbox'
         NETWORK_POLICY         = 'code-sandbox-deny-egress'
         SANDBOX_SECRET_NAME    = 'code-sandbox-secret'
-        AI_CONFIG_NAME         = 'yntrust-yunnan-agent-prod'
-        AI_DEPLOYMENT          = 'yunnan-agent'
-        AI_SERVICE             = 'yunnan-agent-api'
-        AI_SERVICE_PORT        = '32001'
-        SANDBOX_SECRET_CHECKSUM_ANNOTATION = 'code-sandbox-secret-sha256'
-        AI_CONFIG_CHECKSUM_ANNOTATION = 'code-sandbox-config-sha256'
-        EXPECTED_PROD_SANDBOX_URL = 'http://code-sandbox.yntrust-prod.svc:32004'
         CONTAINER_PORT         = '32004'
         DOCKER_BUILDKIT        = '1'
         BUILD_TIMESTAMP        = "${currentBuild.startTimeInMillis}"
@@ -274,90 +267,7 @@ pipeline {
                                 printf 'Production sandbox Secret has no api-key.\n' >&2
                                 exit 1
                             fi
-                            sandbox_secret_checksum="$(printf '%s' "$sandbox_key_b64" | \
-                                python -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
                             unset sandbox_key_b64
-
-                            ai_secret_name="$(kubectl --kubeconfig="$DEPLOY_KUBECONFIG" \
-                                -n "$NAMESPACE" get deployment "$AI_DEPLOYMENT" \
-                                -o jsonpath='{.spec.template.spec.containers[?(@.name=="yunnan-agent-api")].env[?(@.name=="CODE_SANDBOX_API_KEY")].valueFrom.secretKeyRef.name}')"
-                            ai_secret_key="$(kubectl --kubeconfig="$DEPLOY_KUBECONFIG" \
-                                -n "$NAMESPACE" get deployment "$AI_DEPLOYMENT" \
-                                -o jsonpath='{.spec.template.spec.containers[?(@.name=="yunnan-agent-api")].env[?(@.name=="CODE_SANDBOX_API_KEY")].valueFrom.secretKeyRef.key}')"
-                            ai_secret_optional="$(kubectl --kubeconfig="$DEPLOY_KUBECONFIG" \
-                                -n "$NAMESPACE" get deployment "$AI_DEPLOYMENT" \
-                                -o jsonpath='{.spec.template.spec.containers[?(@.name=="yunnan-agent-api")].env[?(@.name=="CODE_SANDBOX_API_KEY")].valueFrom.secretKeyRef.optional}')"
-                            if [ "$ai_secret_name" != "$SANDBOX_SECRET_NAME" ] || \
-                               [ "$ai_secret_key" != "api-key" ] || \
-                               [ "$ai_secret_optional" != "false" ]; then
-                                printf 'AI production Deployment must use the shared sandbox Secret.\n' >&2
-                                exit 1
-                            fi
-                            unset ai_secret_name ai_secret_key ai_secret_optional
-
-                            ai_secret_checksum="$(kubectl --kubeconfig="$DEPLOY_KUBECONFIG" \
-                                -n "$NAMESPACE" get deployment "$AI_DEPLOYMENT" \
-                                -o "go-template={{index .spec.template.metadata.annotations \"$SANDBOX_SECRET_CHECKSUM_ANNOTATION\"}}")"
-                            if [ -z "$ai_secret_checksum" ] || \
-                               [ "$ai_secret_checksum" != "$sandbox_secret_checksum" ]; then
-                                printf 'AI production Pods have not loaded the current sandbox Secret.\n' >&2
-                                exit 1
-                            fi
-                            unset ai_secret_checksum sandbox_secret_checksum
-
-                            kubectl --kubeconfig="$DEPLOY_KUBECONFIG" -n "$NAMESPACE" \
-                                rollout status deployment/"$AI_DEPLOYMENT" --timeout=30s
-
-                            kubectl --kubeconfig="$DEPLOY_KUBECONFIG" -n "$NAMESPACE" \
-                                get configmap "$AI_CONFIG_NAME" >/dev/null
-                            current_ai_config_checksum="$(kubectl --kubeconfig="$DEPLOY_KUBECONFIG" \
-                                -n "$NAMESPACE" get configmap "$AI_CONFIG_NAME" -o json | \
-                                python -c 'import hashlib, json, sys; data=json.load(sys.stdin).get("data") or {}; canonical=json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(); print(hashlib.sha256(canonical).hexdigest())')"
-                            ai_config_checksum="$(kubectl --kubeconfig="$DEPLOY_KUBECONFIG" \
-                                -n "$NAMESPACE" get deployment "$AI_DEPLOYMENT" \
-                                -o "go-template={{index .spec.template.metadata.annotations \"$AI_CONFIG_CHECKSUM_ANNOTATION\"}}")"
-                            if [ -z "$ai_config_checksum" ] || \
-                               [ "$ai_config_checksum" != "$current_ai_config_checksum" ]; then
-                                printf 'AI production Pods have not loaded the current ConfigMap.\n' >&2
-                                exit 1
-                            fi
-                            unset ai_config_checksum current_ai_config_checksum
-                            ai_config_value() {
-                                key="$1"
-                                kubectl --kubeconfig="$DEPLOY_KUBECONFIG" -n "$NAMESPACE" \
-                                    get configmap "$AI_CONFIG_NAME" \
-                                    -o "jsonpath={.data.$key}"
-                            }
-                            require_ai_config_equals() {
-                                key="$1"
-                                expected="$2"
-                                actual="$(ai_config_value "$key")"
-                                if [ "$actual" != "$expected" ]; then
-                                    printf 'AI production ConfigMap key %s does not match the sandbox production contract.\n' \
-                                        "$key" >&2
-                                    return 1
-                                fi
-                            }
-
-                            require_ai_config_equals "CODE_SANDBOX_BASE_URL" \
-                                "$EXPECTED_PROD_SANDBOX_URL"
-                            require_ai_config_equals "CODE_SANDBOX_MAX_EXECUTION_SECONDS" "240"
-
-                            ai_runtime_proxy_path="/api/v1/namespaces/${NAMESPACE}/services/http:${AI_SERVICE}:${AI_SERVICE_PORT}/proxy/v1/internal/config/environment"
-                            ai_runtime_json="$(kubectl --kubeconfig="$DEPLOY_KUBECONFIG" \
-                                get --raw "$ai_runtime_proxy_path")"
-                            ai_runtime_values="$(printf '%s' "$ai_runtime_json" | python -c \
-                                'import json, sys; runtime=json.load(sys.stdin); print(runtime["app_env"]); print(runtime["code_sandbox"]["base_url"] or "")')"
-                            unset ai_runtime_json
-                            ai_runtime_env="$(printf '%s\n' "$ai_runtime_values" | sed -n '1p')"
-                            ai_runtime_sandbox_url="$(printf '%s\n' "$ai_runtime_values" | sed -n '2p')"
-                            unset ai_runtime_values
-                            if [ "$ai_runtime_env" != "prod" ] || \
-                               [ "$ai_runtime_sandbox_url" != "$EXPECTED_PROD_SANDBOX_URL" ]; then
-                                printf 'AI production runtime has not loaded the sandbox production contract.\n' >&2
-                                exit 1
-                            fi
-                            unset ai_runtime_env ai_runtime_sandbox_url ai_runtime_proxy_path
                         fi
                     '''
                 }
@@ -483,7 +393,7 @@ pipeline {
                             fi
                             if [ -n "$existing_resource" ]; then
                                 last_applied="$(kube -n "$NAMESPACE" get "$kind" "$name" \
-                                    -o go-template='{{index .metadata.annotations "kubectl.kubernetes.io/last-applied-configuration"}}')"
+                                    -o jsonpath='{.metadata.annotations.kubectl\\.kubernetes\\.io/last-applied-configuration}')"
                                 if [ -z "$last_applied" ]; then
                                     printf 'Existing production resource is not managed by kubectl apply: %s/%s.\n' \
                                         "$kind" "$name" >&2
