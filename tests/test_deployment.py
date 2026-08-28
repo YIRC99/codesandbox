@@ -25,6 +25,37 @@ def install_shell_stub(directory: Path, name: str, body: str) -> None:
     executable.chmod(0o755)
 
 
+def invalid_groovy_shell_escapes(jenkinsfile: str) -> list[tuple[int, str]]:
+    invalid_escapes: list[tuple[int, str]] = []
+    valid_escaped_characters = set("btnfr'\"\\$\r\n")
+
+    for block_match in re.finditer(r"'''(.*?)'''", jenkinsfile, flags=re.DOTALL):
+        block = block_match.group(1)
+        for escape_match in re.finditer(r"(\\+)(.)", block, flags=re.DOTALL):
+            backslashes, escaped_character = escape_match.groups()
+            if len(backslashes) % 2 == 0:
+                continue
+            line = (
+                jenkinsfile.count(
+                    "\n",
+                    0,
+                    block_match.start(1) + escape_match.start(),
+                )
+                + 1
+            )
+            if escaped_character == "u":
+                unicode_digits = block[escape_match.end() : escape_match.end() + 4]
+                if re.fullmatch(r"[0-9A-Fa-f]{4}", unicode_digits):
+                    continue
+                invalid_escapes.append((line, backslashes + "u" + unicode_digits))
+                continue
+            if escaped_character in valid_escaped_characters:
+                continue
+            invalid_escapes.append((line, backslashes + escaped_character))
+
+    return invalid_escapes
+
+
 def all_kubernetes_yaml() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "k8s").rglob("*.yaml"))
 
@@ -117,27 +148,13 @@ def test_jenkins_verifies_the_approved_production_cluster() -> None:
 
 
 def test_jenkins_shell_blocks_have_only_valid_groovy_escape_sequences() -> None:
-    jenkinsfile = read("Jenkinsfile")
-    invalid_escapes: list[tuple[int, str]] = []
+    assert invalid_groovy_shell_escapes(read("Jenkinsfile")) == []
 
-    valid_escaped_characters = set("btnfr'\"\\$u\r\n")
-    for block_match in re.finditer(r"'''(.*?)'''", jenkinsfile, flags=re.DOTALL):
-        block = block_match.group(1)
-        for escape_match in re.finditer(r"(\\+)(.)", block, flags=re.DOTALL):
-            backslashes, escaped_character = escape_match.groups()
-            if len(backslashes) % 2 == 0 or escaped_character in valid_escaped_characters:
-                continue
-            line = (
-                jenkinsfile.count(
-                    "\n",
-                    0,
-                    block_match.start(1) + escape_match.start(),
-                )
-                + 1
-            )
-            invalid_escapes.append((line, backslashes + escaped_character))
 
-    assert invalid_escapes == []
+def test_groovy_escape_validator_rejects_malformed_unicode_escape() -> None:
+    malformed_jenkinsfile = "sh '''printf '\\u12xz'\n'''"
+
+    assert invalid_groovy_shell_escapes(malformed_jenkinsfile) == [(1, "\\u12xz")]
 
 
 def test_prod_preflight_is_independent_of_other_project_resources(tmp_path: Path) -> None:

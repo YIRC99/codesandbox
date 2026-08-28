@@ -155,11 +155,13 @@ Deployment 固定为一个副本并采用 `Recreate` 更新策略。代码上传
 生产环境必须先创建 `code-sandbox-secret`，prod 清单会强制读取其中的 `api-key`，Secret 或字段缺失时流水线会在修改工作负载前停止。密钥只保存在 Kubernetes Secret 中，不要写入 ConfigMap、仓库或构建日志。调用方如何引用该 Secret 属于调用方自己的部署配置，不是本项目发布的前置依赖。dev/test 清单仍允许 Secret 不存在，此时业务接口不会鉴权。示例：
 
 ```bash
-kubectl create namespace yntrust-dev --dry-run=client -o yaml | kubectl apply -f -
-kubectl create secret generic code-sandbox-secret \
+kubectl --kubeconfig <prod-kubeconfig> --namespace yntrust-prod \
+  create secret generic code-sandbox-secret \
   --from-literal=api-key='replace-with-a-long-random-value' \
-  -n yntrust-dev
-kubectl apply -k k8s/overlays/dev
+  --dry-run=client -o yaml | \
+kubectl --kubeconfig <prod-kubeconfig> --namespace yntrust-prod apply -f -
+kubectl --kubeconfig <prod-kubeconfig> --namespace yntrust-prod \
+  apply -k k8s/overlays/prod
 ```
 
 Kubernetes 清单默认禁止 Pod 主动访问外网；如果回测代码需要通过 `yfinance` 或 HTTP 获取行情，必须由运维按允许的目标地址调整或移除 `network-policy.yaml`，不能直接开放任意出口。
