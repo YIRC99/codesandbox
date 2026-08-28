@@ -1,3 +1,6 @@
+import os
+import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -5,6 +8,21 @@ ROOT = Path(__file__).parents[1]
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def read_stage_shell(stage_name: str) -> str:
+    jenkinsfile = read("Jenkinsfile")
+    stage_start = jenkinsfile.index(f"stage('{stage_name}')")
+    next_stage = jenkinsfile.find("stage('", stage_start + 1)
+    stage = jenkinsfile[stage_start : next_stage if next_stage >= 0 else None]
+    shell_start = stage.index("'''") + 3
+    return stage[shell_start : stage.index("'''", shell_start)]
+
+
+def install_shell_stub(directory: Path, name: str, body: str) -> None:
+    executable = directory / name
+    executable.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    executable.chmod(0o755)
 
 
 def all_kubernetes_yaml() -> str:
@@ -98,30 +116,101 @@ def test_jenkins_verifies_the_approved_production_cluster() -> None:
     assert "Kubernetes credential points to an unapproved production cluster" in jenkinsfile
 
 
-def test_jenkins_validates_production_sandbox_address_and_timeout() -> None:
+def test_jenkins_shell_blocks_have_only_valid_groovy_escape_sequences() -> None:
+    jenkinsfile = read("Jenkinsfile")
+    invalid_escapes: list[tuple[int, str]] = []
+
+    valid_escaped_characters = set("btnfr'\"\\$u\r\n")
+    for block_match in re.finditer(r"'''(.*?)'''", jenkinsfile, flags=re.DOTALL):
+        block = block_match.group(1)
+        for escape_match in re.finditer(r"(\\+)(.)", block, flags=re.DOTALL):
+            backslashes, escaped_character = escape_match.groups()
+            if len(backslashes) % 2 == 0 or escaped_character in valid_escaped_characters:
+                continue
+            line = (
+                jenkinsfile.count(
+                    "\n",
+                    0,
+                    block_match.start(1) + escape_match.start(),
+                )
+                + 1
+            )
+            invalid_escapes.append((line, backslashes + escaped_character))
+
+    assert invalid_escapes == []
+
+
+def test_prod_preflight_is_independent_of_other_project_resources(tmp_path: Path) -> None:
+    command_directory = tmp_path / "bin"
+    command_directory.mkdir()
+    kubectl_log = tmp_path / "kubectl.log"
+    source_kubeconfig = tmp_path / "source-kubeconfig"
+    source_kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+
+    install_shell_stub(
+        command_directory,
+        "kubectl",
+        r"""
+printf '%s\n' "$*" >> "$KUBECTL_LOG"
+case "$*" in
+  *"yunnan-agent"*)
+    printf 'cross-project Kubernetes access is forbidden in this test\n' >&2
+    exit 86
+    ;;
+  *"jsonpath={.contexts[0].context.cluster}"*) printf 'prod-cluster' ;;
+  *"jsonpath={.clusters[0].cluster.server}"*) printf 'https://prod.example:6443' ;;
+  *"get namespace kube-system"*) printf '%s' "$PROD_KUBE_SYSTEM_UID" ;;
+  *"auth can-i"*) printf 'yes\n' ;;
+  *"get secret code-sandbox-secret -o go-template="*) printf 'encoded-api-key' ;;
+  *) exit 0 ;;
+esac
+""".strip(),
+    )
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{command_directory}:{os.environ['PATH']}",
+            "KUBECTL_LOG": str(kubectl_log),
+            "SOURCE_KUBECONFIG": str(source_kubeconfig),
+            "DEPLOY_KUBECONFIG": str(tmp_path / "deploy-kubeconfig"),
+            "WORKSPACE": str(tmp_path / "workspace"),
+            "TARGET_ENV": "prod",
+            "PROD_CLUSTER_ID": "c-ndk6g",
+            "PROD_KUBE_SYSTEM_UID": "d209eee5-0851-405d-a37b-9cae4dd506a7",
+            "NAMESPACE": "yntrust-prod",
+            "SANDBOX_SECRET_NAME": "code-sandbox-secret",
+            "AI_DEPLOYMENT": "yunnan-agent",
+            "AI_CONFIG_NAME": "yntrust-yunnan-agent-prod",
+            "AI_SERVICE": "yunnan-agent-api",
+            "AI_SERVICE_PORT": "32001",
+            "SANDBOX_SECRET_CHECKSUM_ANNOTATION": "code-sandbox-secret-sha256",
+            "AI_CONFIG_CHECKSUM_ANNOTATION": "code-sandbox-config-sha256",
+            "EXPECTED_PROD_SANDBOX_URL": "http://code-sandbox.yntrust-prod.svc:32004",
+        }
+    )
+    result = subprocess.run(
+        ["/bin/sh"],
+        input=read_stage_shell("Prepare Kubernetes Access"),
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = kubectl_log.read_text(encoding="utf-8")
+    assert "get secret code-sandbox-secret" in calls
+    assert "yunnan-agent" not in calls
+
+
+def test_jenkins_requires_only_the_production_sandbox_secret() -> None:
     jenkinsfile = read("Jenkinsfile")
 
-    assert "AI_CONFIG_NAME         = 'yntrust-yunnan-agent-prod'" in jenkinsfile
-    assert "EXPECTED_PROD_SANDBOX_URL = 'http://code-sandbox.yntrust-prod.svc:32004'" in jenkinsfile
-    assert 'require_ai_config_equals "CODE_SANDBOX_BASE_URL"' in jenkinsfile
-    assert 'require_ai_config_equals "CODE_SANDBOX_MAX_EXECUTION_SECONDS" "240"' in (jenkinsfile)
     assert "require_permission get secrets" in jenkinsfile
     assert 'get secret "$SANDBOX_SECRET_NAME"' in jenkinsfile
     assert "Production sandbox Secret has no api-key" in jenkinsfile
-    assert 'name=="CODE_SANDBOX_API_KEY"' in jenkinsfile
-    assert "AI production Deployment must use the shared sandbox Secret" in jenkinsfile
-    assert "code-sandbox-secret-sha256" in jenkinsfile
-    assert "ai_secret_checksum" in jenkinsfile
-    assert "sandbox_secret_checksum" in jenkinsfile
-    assert "code-sandbox-config-sha256" in jenkinsfile
-    assert "ai_config_checksum" in jenkinsfile
-    assert "current_ai_config_checksum" in jenkinsfile
-    assert 'rollout status deployment/"$AI_DEPLOYMENT" --timeout=30s' in jenkinsfile
-    assert "/proxy/v1/internal/config/environment" in jenkinsfile
-    assert 'runtime["app_env"]' in jenkinsfile
-    assert 'runtime["code_sandbox"]["base_url"]' in jenkinsfile
-    assert "AI production runtime has not loaded the sandbox production contract" in (jenkinsfile)
-    assert "ai_api_key=" not in jenkinsfile
     assert "base64 --decode" not in jenkinsfile
 
 
