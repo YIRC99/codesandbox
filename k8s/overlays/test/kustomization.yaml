@@ -6,7 +6,7 @@ resources:
   - ../../base
 images:
   - name: code-sandbox
-    newName: 172.16.10.17:7747/yntrust-test/code-sandbox
+    newName: 172.16.10.30:7747/yntrust-test/code-sandbox
     newTag: latest
 patches:
   - path: service-patch.yaml
