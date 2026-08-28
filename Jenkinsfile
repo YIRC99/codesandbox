@@ -483,7 +483,7 @@ pipeline {
                             fi
                             if [ -n "$existing_resource" ]; then
                                 last_applied="$(kube -n "$NAMESPACE" get "$kind" "$name" \
-                                    -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}')"
+                                    -o go-template='{{index .metadata.annotations "kubectl.kubernetes.io/last-applied-configuration"}}')"
                                 if [ -z "$last_applied" ]; then
                                     printf 'Existing production resource is not managed by kubectl apply: %s/%s.\n' \
                                         "$kind" "$name" >&2

@@ -216,6 +216,16 @@ def test_jenkins_validates_one_rendered_image_and_prints_rollout_diagnostics() -
     assert 'logs "$pod" --all-containers' in jenkinsfile
 
 
+def test_jenkins_avoids_invalid_groovy_escape_in_rollback_annotation_lookup() -> None:
+    jenkinsfile = read("Jenkinsfile")
+
+    assert r"kubectl\.kubernetes\.io/last-applied-configuration" not in jenkinsfile
+    assert (
+        "-o go-template='{{index .metadata.annotations "
+        '"kubectl.kubernetes.io/last-applied-configuration"}}\'' in jenkinsfile
+    )
+
+
 def test_deployment_has_container_and_pod_security_controls() -> None:
     manifests = all_kubernetes_yaml()
 
