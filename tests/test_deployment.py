@@ -63,9 +63,122 @@ def test_jenkins_uses_installed_credentials_binding_steps() -> None:
     assert "withKubeConfig" not in jenkinsfile
     assert "withCredentials([usernamePassword(" in jenkinsfile
     assert "withCredentials([file(" in jenkinsfile
-    assert "172.16.10.17:7747" in jenkinsfile
-    assert "yntrust-test/code-sandbox" in jenkinsfile
-    assert "yntrust-dev/code-sandbox" in jenkinsfile
+    assert "REGISTRY_HOST          = '172.16.10.30:7747'" in jenkinsfile
+    assert "DOCKER_CREDENTIAL_ID   = 'f41569d7-7caf-439c-bb79-43416888c346'" in jenkinsfile
+    assert "NON_PROD_K8S_CREDENTIAL_ID = 'c397a5b5-bc78-4749-b03c-823eddb4aece'" in jenkinsfile
+    assert "PROD_K8S_CREDENTIAL_ID = 'lingneng-multi-agent-kubeconfig-prod'" in jenkinsfile
+
+
+def test_jenkins_maps_main_to_prod_and_rejects_job_branch_mismatches() -> None:
+    jenkinsfile = read("Jenkinsfile")
+
+    assert "properties([disableConcurrentBuilds()])" in jenkinsfile
+    assert "def resolveTargetEnvironment()" in jenkinsfile
+    assert "env.CHECKED_OUT_BRANCH = (scmVars.GIT_BRANCH ?: '').toString()" in jenkinsfile
+    assert "jobName.endsWith('-prod')" in jenkinsfile
+    assert "branch == 'main'" in jenkinsfile
+    assert "branchTarget = 'prod'" in jenkinsfile
+    assert "def expectedJobBranch = [dev: 'dev', test: 'test', prod: 'main'][jobTarget]" in (
+        jenkinsfile
+    )
+    assert "if (jobTarget && branch != expectedJobBranch)" in jenkinsfile
+    assert "Jenkins job/branch target mismatch" in jenkinsfile
+    assert "env.REGISTRY_PROJECT = 'yntrust-prod'" in jenkinsfile
+    assert "env.NAMESPACE = 'yntrust-prod'" in jenkinsfile
+    assert 'env.OVERLAY_PATH = "k8s/overlays/${env.TARGET_ENV}"' in jenkinsfile
+
+
+def test_jenkins_verifies_the_approved_production_cluster() -> None:
+    jenkinsfile = read("Jenkinsfile")
+
+    assert "PROD_CLUSTER_ID       = 'c-ndk6g'" in jenkinsfile
+    assert "PROD_KUBE_SYSTEM_UID   = 'd209eee5-0851-405d-a37b-9cae4dd506a7'" in jenkinsfile
+    assert '*/k8s/clusters/"$PROD_CLUSTER_ID")' in jenkinsfile
+    assert "get namespace kube-system -o jsonpath='{.metadata.uid}'" in jenkinsfile
+    assert "Kubernetes credential points to an unapproved production cluster" in jenkinsfile
+
+
+def test_jenkins_validates_production_sandbox_address_and_timeout() -> None:
+    jenkinsfile = read("Jenkinsfile")
+
+    assert "AI_CONFIG_NAME         = 'yntrust-yunnan-agent-prod'" in jenkinsfile
+    assert "EXPECTED_PROD_SANDBOX_URL = 'http://code-sandbox.yntrust-prod.svc:32004'" in jenkinsfile
+    assert 'require_ai_config_equals "CODE_SANDBOX_BASE_URL"' in jenkinsfile
+    assert 'require_ai_config_equals "CODE_SANDBOX_MAX_EXECUTION_SECONDS" "240"' in (jenkinsfile)
+    assert "require_permission get secrets" in jenkinsfile
+    assert 'get secret "$SANDBOX_SECRET_NAME"' in jenkinsfile
+    assert "Production sandbox Secret has no api-key" in jenkinsfile
+    assert 'name=="CODE_SANDBOX_API_KEY"' in jenkinsfile
+    assert "AI production Deployment must use the shared sandbox Secret" in jenkinsfile
+    assert "code-sandbox-secret-sha256" in jenkinsfile
+    assert "ai_secret_checksum" in jenkinsfile
+    assert "sandbox_secret_checksum" in jenkinsfile
+    assert "code-sandbox-config-sha256" in jenkinsfile
+    assert "ai_config_checksum" in jenkinsfile
+    assert "current_ai_config_checksum" in jenkinsfile
+    assert 'rollout status deployment/"$AI_DEPLOYMENT" --timeout=30s' in jenkinsfile
+    assert "/proxy/v1/internal/config/environment" in jenkinsfile
+    assert 'runtime["app_env"]' in jenkinsfile
+    assert 'runtime["code_sandbox"]["base_url"]' in jenkinsfile
+    assert "AI production runtime has not loaded the sandbox production contract" in (jenkinsfile)
+    assert "ai_api_key=" not in jenkinsfile
+    assert "base64 --decode" not in jenkinsfile
+
+
+def test_prod_requires_the_sandbox_secret_and_non_prod_keeps_it_optional() -> None:
+    jenkinsfile = read("Jenkinsfile")
+    base_deployment = read("k8s/base/deployment.yaml")
+    prod_patch = read("k8s/overlays/prod/deployment-patch.yaml")
+    prod_kustomization = read("k8s/overlays/prod/kustomization.yaml")
+
+    assert "optional: true" in base_deployment
+    assert "name: SANDBOX_API_KEY" in prod_patch
+    assert "name: code-sandbox-secret" in prod_patch
+    assert "key: api-key" in prod_patch
+    assert "optional: false" in prod_patch
+    assert "deployment-patch.yaml" in prod_kustomization
+    assert 'PROD_REQUIRED_SECRET_COUNT=$(grep -Fc "optional: false"' in jenkinsfile
+    assert 'PROD_OPTIONAL_SECRET_COUNT=$(grep -Fc "optional: true"' in jenkinsfile
+
+
+def test_prod_rollback_covers_every_mutable_kustomize_resource() -> None:
+    jenkinsfile = read("Jenkinsfile")
+
+    for resource in (
+        'deployment "$DEPLOYMENT"',
+        'configmap "$CONFIG_NAME"',
+        'service "$SERVICE"',
+        'serviceaccount "$SERVICE_ACCOUNT"',
+        'networkpolicy "$NETWORK_POLICY"',
+    ):
+        assert f"snapshot_resource {resource}" in jenkinsfile
+
+    assert 'restore_resource "$config_existed" configmap "$CONFIG_NAME"' in jenkinsfile
+    assert 'restore_resource "$deployment_existed" deployment "$DEPLOYMENT"' in jenkinsfile
+    assert 'restore_resource "$service_existed" service "$SERVICE"' in jenkinsfile
+    assert (
+        'restore_resource "$service_account_existed" serviceaccount "$SERVICE_ACCOUNT"'
+        in jenkinsfile
+    )
+    assert "current_revision=" not in jenkinsfile
+    assert "--ignore-not-found -o name" in jenkinsfile
+    assert (
+        'restore_resource "$network_policy_existed" networkpolicy "$NETWORK_POLICY"' in jenkinsfile
+    )
+
+
+def test_jenkins_uses_internal_health_check_and_delayed_prod_latest() -> None:
+    jenkinsfile = read("Jenkinsfile")
+
+    deploy_position = jenkinsfile.index("stage('Deploy')")
+    publish_position = jenkinsfile.index("stage('Publish Latest Image')")
+    assert deploy_position < publish_position
+    assert 'sandbox_health_proxy_path="/api/v1/namespaces/${NAMESPACE}/services/' in (jenkinsfile)
+    assert 'http:${SERVICE}:${CONTAINER_PORT}/proxy/health"' in jenkinsfile
+    assert 'kubectl --kubeconfig="${DEPLOY_KUBECONFIG}" get --raw "$proxy_path"' in (jenkinsfile)
+    assert 'if [ "$TARGET_ENV" != "prod" ]; then' in jenkinsfile
+    assert 'docker push "$LATEST_REF"' in jenkinsfile[publish_position:]
+    assert 'def imageTag = "prod-${env.GIT_COMMIT_FULL}"' in jenkinsfile
 
 
 def test_jenkins_validates_one_rendered_image_and_prints_rollout_diagnostics() -> None:
@@ -96,8 +209,8 @@ def test_jenkins_validates_one_rendered_image_and_prints_rollout_diagnostics() -
     assert "render_kustomization.py" not in jenkinsfile
     assert "apply -k k8s/overlays/prod" not in jenkinsfile
     assert "kube set image" not in jenkinsfile
-    assert "rollout status deployment/code-sandbox-deployment --timeout=300s" in jenkinsfile
-    assert "describe deployment code-sandbox-deployment" in jenkinsfile
+    assert 'rollout status deployment/"$DEPLOYMENT" --timeout=300s' in jenkinsfile
+    assert 'describe deployment "$DEPLOYMENT"' in jenkinsfile
     assert "describe pvc" not in jenkinsfile
     assert "describe pod" in jenkinsfile
     assert 'logs "$pod" --all-containers' in jenkinsfile
@@ -159,11 +272,26 @@ def test_kubernetes_uses_one_ephemeral_pod_without_scaling_resources() -> None:
 
 
 def test_kubernetes_service_exposes_environment_node_ports() -> None:
+    base_service = read("k8s/base/service.yaml")
     dev_patch = read("k8s/overlays/dev/service-patch.yaml")
     test_patch = read("k8s/overlays/test/service-patch.yaml")
+    prod_kustomization = read("k8s/overlays/prod/kustomization.yaml")
 
+    assert "type: ClusterIP" in base_service
+    assert "nodePort:" not in base_service
+    assert "type: NodePort" in dev_patch
     assert "nodePort: 32004" in dev_patch
+    assert "type: NodePort" in test_patch
     assert "nodePort: 32014" in test_patch
+    assert "namespace: yntrust-prod" in prod_kustomization
+    assert "namespace.yaml" not in prod_kustomization
+    assert "172.16.10.30:7747/yntrust-prod/code-sandbox" in prod_kustomization
+
+
+def test_all_kubernetes_overlays_use_the_current_harbor() -> None:
+    for environment in ("dev", "test", "prod"):
+        kustomization = read(f"k8s/overlays/{environment}/kustomization.yaml")
+        assert f"172.16.10.30:7747/yntrust-{environment}/code-sandbox" in kustomization
 
 
 def test_kubernetes_exposes_only_environment_nodeports() -> None:

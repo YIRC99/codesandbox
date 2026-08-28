@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-sandbox-deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: code-sandbox
+          env:
+            - name: SANDBOX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: code-sandbox-secret
+                  key: api-key
+                  optional: false

@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: yntrust-prod
+resources:
+  - ../../base
+images:
+  - name: code-sandbox
+    newName: 172.16.10.30:7747/yntrust-prod/code-sandbox
+    newTag: prod-latest
+patches:
+  - path: deployment-patch.yaml
