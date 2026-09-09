@@ -141,7 +141,10 @@ class BacktestRuntimeParameters(BaseModel):
 
     initial_capital: StrictStr
     fee_rate: StrictStr
-    slippage_rate: StrictStr
+    slippage_rate: StrictStr = Field(
+        description="Signed slippage rate: -1 < value < 1; negative values improve fill prices.",
+        examples=["0.0005", "-0.001"],
+    )
     max_drawdown_limit_rate: StrictStr
     contract_multiplier: StrictStr | None = None
     margin_rate: StrictStr | None = None
@@ -168,10 +171,12 @@ class BacktestRuntimeParameters(BaseModel):
             raise ValueError("runtime parameter must be finite")
         if info.field_name == "initial_capital" and decimal_value <= Decimal("0"):
             raise ValueError("initial_capital must be greater than 0")
-        if info.field_name in {"fee_rate", "slippage_rate"} and not (
-            Decimal("0") <= decimal_value < Decimal("1")
-        ):
+        if info.field_name == "fee_rate" and not (Decimal("0") <= decimal_value < Decimal("1")):
             raise ValueError(f"{info.field_name} must satisfy 0 <= value < 1")
+        if info.field_name == "slippage_rate" and not (
+            Decimal("-1") < decimal_value < Decimal("1")
+        ):
+            raise ValueError("slippage_rate must satisfy -1 < value < 1")
         if info.field_name == "max_drawdown_limit_rate" and not (
             Decimal("0") < decimal_value <= Decimal("1")
         ):

@@ -421,7 +421,11 @@ def test_execute_rejects_missing_or_unknown_runtime_parameter_fields(tmp_path: P
         ("initial_capital", "0"),
         ("fee_rate", "-0.0001"),
         ("fee_rate", "1"),
-        ("slippage_rate", "-0.0001"),
+        ("slippage_rate", "-1"),
+        ("slippage_rate", "-1.01"),
+        ("slippage_rate", "NaN"),
+        ("slippage_rate", "-Infinity"),
+        ("slippage_rate", -0.001),
         ("slippage_rate", "1"),
         ("max_drawdown_limit_rate", "0"),
         ("max_drawdown_limit_rate", "1.0001"),
@@ -454,6 +458,8 @@ def test_execute_rejects_invalid_runtime_parameter_values(
         ("fee_rate", "0"),
         ("fee_rate", "0.999999"),
         ("slippage_rate", "0"),
+        ("slippage_rate", "-0.001"),
+        ("slippage_rate", "-0.999999"),
         ("slippage_rate", "0.999999"),
         ("max_drawdown_limit_rate", "0.0001"),
         ("max_drawdown_limit_rate", "1"),
@@ -465,7 +471,13 @@ def test_execute_accepts_runtime_parameter_boundary_values(
     value: str,
 ) -> None:
     with make_client(tmp_path) as client:
-        identity = upload(client, f"valid_{field}.py", "print('ok')").json()
+        identity = upload(
+            client,
+            f"valid_{field}.py",
+            "import json, sys\n"
+            "with open(sys.argv[2], encoding='utf-8') as f:\n"
+            f"    print(json.load(f)[{field!r}])\n",
+        ).json()
         response = client.post(
             "/execute",
             headers=auth_headers(),
@@ -477,6 +489,8 @@ def test_execute_accepts_runtime_parameter_boundary_values(
 
     assert response.status_code == 200
     assert response.json()["status"] == "success"
+    assert response.json()["exit_code"] == 0
+    assert response.json()["stdout"].strip() == value
 
 
 def test_execute_accepts_complete_futures_runtime_parameters(tmp_path: Path) -> None:
