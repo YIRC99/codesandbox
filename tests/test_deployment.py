@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -21,7 +22,7 @@ def read_stage_shell(stage_name: str) -> str:
 
 def install_shell_stub(directory: Path, name: str, body: str) -> None:
     executable = directory / name
-    executable.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    executable.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8", newline="\n")
     executable.chmod(0o755)
 
 
@@ -187,11 +188,11 @@ esac
     environment = os.environ.copy()
     environment.update(
         {
-            "PATH": f"{command_directory}:{os.environ['PATH']}",
-            "KUBECTL_LOG": str(kubectl_log),
-            "SOURCE_KUBECONFIG": str(source_kubeconfig),
-            "DEPLOY_KUBECONFIG": str(tmp_path / "deploy-kubeconfig"),
-            "WORKSPACE": str(tmp_path / "workspace"),
+            "TEST_COMMAND_DIRECTORY": command_directory.as_posix(),
+            "KUBECTL_LOG": kubectl_log.as_posix(),
+            "SOURCE_KUBECONFIG": source_kubeconfig.as_posix(),
+            "DEPLOY_KUBECONFIG": (tmp_path / "deploy-kubeconfig").as_posix(),
+            "WORKSPACE": (tmp_path / "workspace").as_posix(),
             "TARGET_ENV": "prod",
             "PROD_CLUSTER_ID": "c-ndk6g",
             "PROD_KUBE_SYSTEM_UID": "d209eee5-0851-405d-a37b-9cae4dd506a7",
@@ -207,8 +208,11 @@ esac
         }
     )
     result = subprocess.run(
-        ["/bin/sh"],
-        input=read_stage_shell("Prepare Kubernetes Access"),
+        [shutil.which("sh") or "/bin/sh"],
+        input=(
+            'stub_bin=$(cd "$TEST_COMMAND_DIRECTORY" && pwd) || exit 90\n'
+            'export PATH="$stub_bin:$PATH"\n' + read_stage_shell("Prepare Kubernetes Access")
+        ),
         cwd=tmp_path,
         env=environment,
         text=True,
