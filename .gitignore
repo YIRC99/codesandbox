@@ -9,6 +9,9 @@ venv/
 ENV/
 env/
 .python-version
+.env
+.env.*
+!.env.example
 
 # Runtime data
 uploads/

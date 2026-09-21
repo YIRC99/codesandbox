@@ -27,6 +27,8 @@ uv sync --frozen --group dev
 uv run python main.py
 ```
 
+`main.py` 自动加载项目根目录的 `.env`，已有进程环境变量优先。首次配置可复制 `.env.example` 为 `.env`：本地 Key 留空，`SANDBOX_ANALYSIS_CALLBACK_URLS` 已给出本机 AI 服务的完整取数回调地址。修改 `.env` 后需停止并重新运行上述启动命令，仅代码热重载不会重新读取父进程配置。`.env` 不提交 Git，也不进入镜像构建上下文；直接使用 uvicorn 启动时需显式传入 `--env-file .env`。容器部署继续通过环境变量注入配置。
+
 本地监听 `http://127.0.0.1:32004`。为了方便本地开发，未设置 `SANDBOX_API_KEY` 时业务接口不校验 API Key；部署环境必须设置该值。默认从项目根目录下的 `data` 目录读取 CSV。每次执行都会在独立临时工作区中复制脚本和 CSV，并创建 UTF-8 `parameters.json`；策略脚本通过 `sys.argv[1]` 获取主行情 CSV，通过 `sys.argv[2]` 获取参数文件。存在辅助信号或额外成交腿时，`sys.argv[3]` 是只读 `signals.json` 清单。
 
 ## API
