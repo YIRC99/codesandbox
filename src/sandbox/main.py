@@ -28,6 +28,7 @@ from pydantic import (
 from starlette.responses import JSONResponse
 
 from .admission import ExecutionGate, SandboxBusyError
+from .analysis import install_analysis_routes
 from .config import Settings
 from .executor import ExecutionFileInput, SandboxExecutor, SignalFileInput
 from .storage import (
@@ -325,12 +326,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("正在启动沙箱服务生命周期...")
         cleanup_tasks = [
             asyncio.create_task(_cleanup_loop(storage, resolved_settings.cleanup_interval_seconds))
-            for storage in (application.state.storage, application.state.data_files)
+            for storage in (
+                application.state.storage,
+                application.state.data_files,
+                application.state.analysis.store,
+            )
         ]
         try:
             yield
         finally:
             logger.info("正在关闭沙箱服务生命周期...")
+            await application.state.analysis.close()
             for cleanup_task in cleanup_tasks:
                 cleanup_task.cancel()
             for cleanup_task in cleanup_tasks:
@@ -369,6 +375,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         exc: RequestValidationError,
     ) -> JSONResponse:
+        if request.url.path.startswith("/analysis/"):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": {
+                        "code": "analysis_request_invalid",
+                        "message": "Analysis request is invalid",
+                    }
+                },
+            )
         if request.url.path == "/data-files":
             payload = SandboxErrorResponse(
                 error=SandboxErrorDetail(
@@ -416,10 +432,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return response
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start_time) * 1000
-            logger.exception(
-                f"HTTP 请求异常：方法={request.method} 路径={request.url.path} "
-                f"耗时={elapsed_ms:.2f}ms 请求ID={request_id} 错误={exc}"
-            )
+            if request.url.path.startswith("/analysis/"):
+                # Analysis frames can contain scoped callback credentials; never log locals.
+                logger.error("分析请求发生内部异常：请求ID={}", request_id)
+            else:
+                logger.exception(
+                    f"HTTP 请求异常：方法={request.method} 路径={request.url.path} "
+                    f"耗时={elapsed_ms:.2f}ms 请求ID={request_id} 错误={exc}"
+                )
 
             raise
 
@@ -442,6 +462,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
     authenticated = Depends(require_api_key)
+    install_analysis_routes(application, resolved_settings, authenticated)
 
     @application.get("/health", status_code=status.HTTP_200_OK)
     async def health_check() -> dict[str, int | str]:

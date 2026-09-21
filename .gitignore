@@ -12,6 +12,7 @@ env/
 
 # Runtime data
 uploads/
+analysis-results/
 
 # Local worktrees
 .worktrees/

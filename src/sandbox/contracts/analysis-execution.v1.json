@@ -1,0 +1,50 @@
+{
+  "schema_version": "analysis-execution.v1",
+  "description": "AI 编排端与沙箱分析执行的唯一接口约定；独立于固定回测协议。",
+  "routes": {
+    "execute": "/analysis/execute",
+    "status": "/analysis/executions/{execution_id}",
+    "cancel": "/analysis/executions/{execution_id}",
+    "download": "/analysis/results/{artifact_id}",
+    "release": "/analysis/results/{artifact_id}"
+  },
+  "request": {
+    "required": ["execution_id", "code"],
+    "properties": {
+      "execution_id": "UUID; same ID and same request reuse execution, different request returns conflict",
+      "code": "Python module defining analyze(context); trusted runner invokes function and serializes result",
+      "inputs": "object: dataset alias -> JSON dataset; default {}",
+      "parameters": "object: analysis parameters; default {}",
+      "data_access": "optional {base_url, token}; trusted AI callback, never provider credentials",
+      "timeout": "optional positive seconds bounded by sandbox execution limit"
+    }
+  },
+  "context": {
+    "inputs": "read-only task datasets",
+    "parameters": "analysis parameters",
+    "data.query(endpoint, params)": "call shared AI data gateway; returns full data, raises typed upstream error",
+    "data.read(alias)": "read dataset from inputs"
+  },
+  "callback": {
+    "method": "POST",
+    "path": "/v1/internal/analysis-data/query",
+    "authorization": "Bearer scoped task token; exact configured callback URL allowlist",
+    "request": {"endpoint": "registered data endpoint", "params": "object"},
+    "success": {"data": "complete provider payload, never model preview"},
+    "failure": {"error": ["category", "code", "message", "retryable"]}
+  },
+  "response": {
+    "required": ["execution_id", "status", "stdout", "stderr", "exit_code"],
+    "status": ["running", "success", "error", "timeout", "interrupted"],
+    "optional": ["result", "artifact", "error"],
+    "artifact": ["artifact_id", "filename", "size_bytes", "sha256", "expires_at"],
+    "error": ["category", "code", "message", "retryable"]
+  },
+  "defaults": {"inline_bytes": 2097152, "retention_hours": 24},
+  "invariants": [
+    "Result JSON is a separate channel from truncated logs.",
+    "Both inline and file results survive temporary workspace cleanup until expiry/release.",
+    "Sandbox runs no model and writes no AI business database.",
+    "Existing backtest request, argv and runner behavior remain unchanged."
+  ]
+}

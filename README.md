@@ -115,6 +115,75 @@ sys.argv.append(str(signals_manifest_file))
 
 ## 配置
 
+### 独立分析执行
+
+分析接口与固定回测 `/execute`、CSV 和 `decide(context)` 协议相互独立。可信 runner
+加载定义 `analyze(context)` 的模块，调用该函数，将 JSON 返回值保存到独立结果通道；
+stdout/stderr 仅作为有长度限制的日志。沙箱不解释图表语义，也不调用模型或业务数据库。
+失败时 stderr 包含异常类型、堆栈、生成代码行号和源码行，不采集 locals；超过日志上限会明确截断。
+结果超限使用 `category=resource` / `analysis_result_too_large`，内存分配失败使用
+`analysis_memory_limit`，不归类为需要 AI 修改算法的代码错误；存储、代理和进程基础设施故障另行分类。
+Linux 资源信号退出先于结果 JSON 解析处理：CPU/文件限额分别返回 `analysis_cpu_limit` /
+`analysis_file_limit`，其他信号终止返回基础设施错误 `analysis_process_terminated`，
+不会因遗留空结果文件误报代码 JSON 错误。Windows 回归使用模拟 Linux 退出码验证分类，未实测 Linux 信号。
+
+接口统一使用 `X-API-Key`；分析能力在 `SANDBOX_API_KEY` 为空时返回 503，旧回测行为不变。
+
+| 方法与路径 | 行为 |
+| --- | --- |
+| `POST /analysis/execute` | 传入 UUID `execution_id`、`code`，以及可选 `inputs`、`parameters`、`data_access`、`timeout`，等待执行回执 |
+| `GET /analysis/executions/{execution_id}` | 查询执行回执；请求断连后可继续领取结果，无需重跑 |
+| `DELETE /analysis/executions/{execution_id}` | 显式取消；等待子进程结束后返回 `interrupted` 回执，已完成的结果不变 |
+| `GET /analysis/results/{artifact_id}` | 鉴权下载原始 JSON 文件 |
+| `DELETE /analysis/results/{artifact_id}` | 释放结果文件；重复释放有效回执对应文件也成功 |
+
+相同 ID 和请求复用同一次执行，不同请求使用相同 ID 返回 409。连接断开不会自动取消，
+显式取消或服务正常关闭会终止进程树。单 worker 启动时将遗留 `running` 回执标记为
+`interrupted`，不会自动重跑。幂等范围为回执 24 小时保留期；该目录必须由单个服务 worker 独占。
+并发取消和服务关闭共享一次清理任务，完成真实子进程/代理清理后才释放执行槽。
+回执先完整写入临时文件并 flush/fsync，再原子发布；首次发布不会覆盖已有回执。
+空文件、半段 JSON 或结构损坏的回执恢复为 `interrupted / analysis_receipt_corrupt`；
+同 ID 只返回恢复状态，不重新执行。磁盘持续不可写时也返回明确恢复状态，恢复写盘后再持久化。
+
+`context.inputs`、`context.parameters` 提供任务输入；`context.data.read(alias)` 返回数据副本。
+`context.data.query(endpoint, params)` 仅向配置允许的 AI 回调地址发起 POST，返回完整 `data`；
+保留上游 `data`、`permission`、`infrastructure` 错误类别。代码不能自行访问任意网络或文件，
+可以使用允许的数据分析库（例如 pandas），但不能使用私有属性、动态代码执行和字符串 `.format`。
+这些限制只适用于分析 runner，原回测导入及审计规则不变。
+
+回调 `data_access.base_url` 必须与 `SANDBOX_ANALYSIS_CALLBACK_URLS` 中一个完整 URL 完全一致，
+格式为 `http(s)://<AI 服务>/v1/internal/analysis-data/query`，无用户信息、query 或 fragment。
+回调使用 `Authorization: Bearer <任务 token>`，提交 `{endpoint, params}`；成功返回 `{data: ...}`，
+失败返回 `{error: {category, code, message, retryable}}`。不使用环境代理、不跟随重定向；
+任务凭证仅由父进程持有，不传入生成代码所在的子进程或其临时文件。
+每次执行由父进程创建带随机路径的 loopback 数据代理，只转发该任务已允许的固定 AI 地址；
+子进程只获得本任务代理能力、inputs 和 parameters。普通 Python、operator、pandas、numpy
+反射都无法从 SDK 闭包读取上游凭证或完整执行请求。执行结束或取消时关闭代理和未完成连接，
+子进程审计只允许连接本任务代理地址；这仍沿用下文受限子进程、内部调用方的安全边界。
+
+所有成功结果均保存独立文件并返回 `artifact`（文件名、字节数、SHA-256、过期时间）；
+不超过 2 MiB 时额外返回 `result`。文件在临时工作区清理后仍然可领取，24 小时后按清理周期删除，
+也可显式释放。单次结果受结果大小和进程文件限制的较小值约束，结果及回执总量受存储限额约束。
+JSON 非有限数值（NaN/Infinity）和非 JSON 输出作为代码错误返回。
+
+唯一契约源在 AI 仓库的 `src/agent_platform/application/contracts/analysis-execution.v1.json`。
+本仓库 `src/sandbox/contracts/analysis-execution.v1.json` 是分发副本，禁止单独手改。
+修改源后运行 `uv run python scripts/sync_analysis_contract.py`，再运行
+`uv run python scripts/sync_analysis_contract.py --check` 和两端契约测试。
+AI 仓库不在相邻目录时使用 `--source <契约绝对路径>`。
+
+| 分析环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SANDBOX_ANALYSIS_RESULT_DIR` | `analysis-results`；镜像 `/data/analysis-results` | 结果和执行回执根目录 |
+| `SANDBOX_ANALYSIS_CALLBACK_URLS` | 空 | 逗号分隔的完整回调 URL；空值禁用按需查询 |
+| `SANDBOX_ANALYSIS_MAX_RESULT_BYTES` | `20971520` | 单次结果和回调响应字节上限 |
+| `SANDBOX_ANALYSIS_MAX_STORAGE_BYTES` | `1073741824`；K8s `268435456` | 结果文件及回执存储预算 |
+
+部署清单增加独立分析结果 `emptyDir`，支持同 Pod 内应用进程重启恢复；**Pod 替换后文件会丢失**，
+不提供跨 Pod 持久化保证。当前 NetworkPolicy 禁止所有出口，启用在线数据查询前需要按 AI
+服务标签和端口放行回调及 DNS，同时填写 URL 白名单和 API Key；本地测试通过不表示已部署。
+Windows 沿用项目现有限制：有实际超时/取消和输出限制，Linux 资源 rlimit 仅在 Linux 生效。
+
 | 环境变量 | 默认值 | 说明 |
 | --- | ---: | --- |
 | `SANDBOX_UPLOAD_DIR` | `uploads` | 上传根目录 |

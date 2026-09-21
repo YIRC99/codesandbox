@@ -20,8 +20,8 @@ RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 sandbox \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp sandbox \
-    && mkdir -p /data/uploads /data/data-files \
-    && chown 10001:10001 /data/uploads /data/data-files
+    && mkdir -p /data/uploads /data/data-files /data/analysis-results \
+    && chown 10001:10001 /data/uploads /data/data-files /data/analysis-results
 
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
@@ -31,7 +31,8 @@ COPY --chown=10001:10001 data/ /app/data/
 ENV PATH="/app/.venv/bin:$PATH" \
     HOME="/tmp" \
     PYTHONUNBUFFERED="1" \
-    PYTHONDONTWRITEBYTECODE="1"
+    PYTHONDONTWRITEBYTECODE="1" \
+    SANDBOX_ANALYSIS_RESULT_DIR="/data/analysis-results"
 
 USER 10001:10001
 EXPOSE 32004

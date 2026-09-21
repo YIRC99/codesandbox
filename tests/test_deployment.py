@@ -353,7 +353,9 @@ def test_deployment_has_resources_probes_and_writable_mounts() -> None:
     assert "mountPath: /app/data" not in deployment
     assert "mountPath: /tmp" in deployment
     assert "persistentVolumeClaim:" not in deployment
-    assert deployment.count("emptyDir:") == 3
+    assert deployment.count("emptyDir:") == 4
+    assert "mountPath: /data/analysis-results" in deployment
+    assert "SANDBOX_ANALYSIS_RESULT_DIR: /data/analysis-results" in configmap
     assert deployment.count("sizeLimit: 512Mi") == 2
     assert "optional: true" in deployment
     assert 'SANDBOX_RETENTION_DAYS: "30"' in configmap

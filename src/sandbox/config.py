@@ -36,11 +36,16 @@ class Settings:
     process_file_bytes: int = 20 * 1024 * 1024
     process_open_files: int = 64
     terminate_grace_seconds: float = 1.0
+    analysis_result_dir: Path = field(default_factory=lambda: Path("analysis-results").resolve())
+    analysis_callback_urls: tuple[str, ...] = ()
+    analysis_max_result_bytes: int = 20 * 1024 * 1024
+    analysis_max_storage_bytes: int = 1024 * 1024 * 1024
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "upload_dir", Path(self.upload_dir).resolve())
         object.__setattr__(self, "data_dir", Path(self.data_dir).resolve())
         object.__setattr__(self, "data_upload_dir", Path(self.data_upload_dir).resolve())
+        object.__setattr__(self, "analysis_result_dir", Path(self.analysis_result_dir).resolve())
         positive_fields = (
             "max_upload_bytes",
             "max_data_file_bytes",
@@ -56,6 +61,8 @@ class Settings:
             "process_file_bytes",
             "process_open_files",
             "terminate_grace_seconds",
+            "analysis_max_result_bytes",
+            "analysis_max_storage_bytes",
         )
         for name in positive_fields:
             if getattr(self, name) <= 0:
@@ -85,6 +92,20 @@ class Settings:
             process_file_bytes=_env_int("SANDBOX_PROCESS_FILE_BYTES", 20 * 1024 * 1024),
             process_open_files=_env_int("SANDBOX_PROCESS_OPEN_FILES", 64),
             terminate_grace_seconds=_env_float("SANDBOX_TERMINATE_GRACE_SECONDS", 1.0),
+            analysis_result_dir=Path(os.getenv("SANDBOX_ANALYSIS_RESULT_DIR", "analysis-results")),
+            analysis_callback_urls=tuple(
+                filter(
+                    None,
+                    (
+                        value.strip()
+                        for value in os.getenv("SANDBOX_ANALYSIS_CALLBACK_URLS", "").split(",")
+                    ),
+                )
+            ),
+            analysis_max_result_bytes=_env_int(
+                "SANDBOX_ANALYSIS_MAX_RESULT_BYTES", 20 * 1024 * 1024
+            ),
+            analysis_max_storage_bytes=_env_int("SANDBOX_ANALYSIS_MAX_STORAGE_BYTES", 1024**3),
         )
 
 

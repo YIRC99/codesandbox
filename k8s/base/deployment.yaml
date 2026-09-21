@@ -82,6 +82,8 @@ spec:
               mountPath: /data/data-files
             - name: tmp
               mountPath: /tmp
+            - name: analysis-results
+              mountPath: /data/analysis-results
       volumes:
         - name: uploads
           emptyDir:
@@ -92,3 +94,6 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 1Gi
+        - name: analysis-results
+          emptyDir:
+            sizeLimit: 320Mi
