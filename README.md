@@ -131,11 +131,32 @@ Linux 资源信号退出先于结果 JSON 解析处理：CPU/文件限额分别�
 
 | 方法与路径 | 行为 |
 | --- | --- |
-| `POST /analysis/execute` | 传入 UUID `execution_id`、`code`，以及可选 `inputs`、`parameters`、`data_access`、`timeout`，等待执行回执 |
+| `GET /analysis/runtime` | 鉴权读取完整可信 runner/SDK 源码、实际版本与限制的运行时描述 |
+| `POST /analysis/execute` | 传入 UUID `execution_id`、`code`，以及可选 `inputs`、`parameters`、`data_access`、`timeout`、`expected_runtime_sha256`，等待执行回执 |
 | `GET /analysis/executions/{execution_id}` | 查询执行回执；请求断连后可继续领取结果，无需重跑 |
 | `DELETE /analysis/executions/{execution_id}` | 显式取消；等待子进程结束后返回 `interrupted` 回执，已完成的结果不变 |
 | `GET /analysis/results/{artifact_id}` | 鉴权下载原始 JSON 文件 |
 | `DELETE /analysis/results/{artifact_id}` | 释放结果文件；重复释放有效回执对应文件也成功 |
+
+运行时描述使用 `analysis-runtime.v1`，包含 `runner_source`、`policy_source`、声明的 `sdk_version`（当前 `1.0.0`）、
+实际 Python 版本、允许且已安装分析库的 import 名称到版本映射，以及配置限制和平台资源执行说明。
+`runtime_sha256` 是其余字段按 `ensure_ascii=False`、`sort_keys=True`、`separators=(',', ':')`
+规范化 JSON 后的 UTF-8 SHA-256。描述不包含任务输入、token、API Key 或实际服务绝对路径。
+源码和版本信息由单 worker 捕获并缓存；执行时使用同一份可信源码快照，新进程加载更新。
+配置限制变化会改变描述哈希；有效结果上限取分析结果限制与进程文件限制的较小值。
+依赖发现与执行使用相同的可信解释器安装目录，支持 uv overlay 的额外 site-packages。
+只放行安装元数据记录的包、命名空间包和原生依赖目录；工作目录、任意 PYTHONPATH、
+虚拟环境根目录及服务凭据文件不会因此获得读取权限。
+分析图表由前端根据结果中的视图定义统一渲染。`matplotlib`、`seaborn` 导入需要写入
+文件缓存，`backtesting` 的 Bokeh 依赖需要用户目录，`pandas_ta` 需要 Numba 缓存位置；
+当前分析沙箱不支持这些环境需求，故不在运行时可用依赖中声明，并在执行前明确拒绝导入；
+固定回测入口的依赖与权限不受此限制影响。
+
+AI 编排端应先保存完整描述，再提交可选的 `expected_runtime_sha256`。新执行的预期版本不匹配时，
+返回 HTTP 409 / `infrastructure` / `analysis_runtime_changed`（`retryable=false`），不创建执行、不占用门控。
+未提供预期哈希的旧调用继续可用。每个新执行回执仅附 `runtime_sha256`、`sdk_version`、`python_version`
+三项运行证据，成功和失败都保留；升级后的已有 ID 优先按原请求身份领取，旧版本预期不会阻断恢复。
+旧格式回执保持原证据，无法恢复的损坏历史回执不伪造运行版本。
 
 相同 ID 和请求复用同一次执行，不同请求使用相同 ID 返回 409。连接断开不会自动取消，
 显式取消或服务正常关闭会终止进程树。单 worker 启动时将遗留 `running` 回执标记为
@@ -168,7 +189,7 @@ JSON 非有限数值（NaN/Infinity）和非 JSON 输出作为代码错误返回
 
 唯一契约源在 AI 仓库的 `src/agent_platform/application/contracts/analysis-execution.v1.json`。
 本仓库 `src/sandbox/contracts/analysis-execution.v1.json` 是分发副本，禁止单独手改。
-修改源后运行 `uv run python scripts/sync_analysis_contract.py`，再运行
+修改源后运行 `uv run python scripts/sync_analysis_contract.py --write`，再运行
 `uv run python scripts/sync_analysis_contract.py --check` 和两端契约测试。
 AI 仓库不在相邻目录时使用 `--source <契约绝对路径>`。
 

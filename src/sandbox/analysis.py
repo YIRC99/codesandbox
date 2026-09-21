@@ -17,10 +17,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
-from starlette.responses import FileResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response
 
 from .admission import SandboxBusyError
 from .analysis_proxy import AnalysisDataProxy
+from .analysis_runtime import AnalysisRuntime
 from .executor import SandboxExecutor
 
 _CONTRACT = json.loads(
@@ -44,10 +45,15 @@ class AnalysisRequest(BaseModel):
     parameters: dict = Field(default_factory=dict)
     data_access: DataAccess | None = None
     timeout: float | None = Field(default=None, gt=0)
+    expected_runtime_sha256: StrictStr | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
 
 
 def failure(category, code, message, retryable=False):
     return dict(category=category, code=code, message=message, retryable=retryable)
+
+
+class AnalysisRuntimeChanged(Exception):
+    pass
 
 
 class AnalysisStore:
@@ -221,6 +227,10 @@ class AnalysisStore:
 
 
 class AnalysisExecutor(SandboxExecutor):
+    def __init__(self, settings, runtime=None):
+        super().__init__(settings)
+        self.runtime = runtime or AnalysisRuntime(settings)
+
     async def run_analysis(self, request):
         cancelled = threading.Event()
         job = asyncio.create_task(asyncio.to_thread(self._run_sync, request, cancelled))
@@ -252,12 +262,16 @@ class AnalysisExecutor(SandboxExecutor):
             script = workspace / "analysis.py"
             input_path = workspace / "request.json"
             result_path = workspace / "result.json"
+            runner_path = workspace / "analysis_runner.py"
+            runner_path.write_text(self.runtime.runner_source, encoding="utf-8")
+            (workspace / "runner.py").write_text(self.runtime.policy_source, encoding="utf-8")
             script.write_text(request["code"], encoding="utf-8")
             child_request = {
                 "inputs": request["inputs"],
                 "parameters": request["parameters"],
                 "timeout": request["timeout"],
                 "data_proxy_url": proxy.url,
+                "import_policy": self.runtime.import_policy,
             }
             input_path.write_text(json.dumps(child_request, allow_nan=False), encoding="utf-8")
             environment = self._child_environment()
@@ -269,7 +283,7 @@ class AnalysisExecutor(SandboxExecutor):
                 "-X",
                 "utf8",
                 "-I",
-                str(Path(__file__).with_name("analysis_runner.py")),
+                str(runner_path),
                 str(script),
                 str(input_path),
                 str(result_path),
@@ -395,9 +409,21 @@ class AnalysisService:
         self.gate = gate
         self.store = AnalysisStore(settings)
         self.store.recover_interrupted()
-        self.executor = AnalysisExecutor(settings)
+        self.runtime = AnalysisRuntime(settings)
+        self.executor = AnalysisExecutor(settings, self.runtime)
         self.tasks = {}
         self.cancellations = {}
+
+    def request_fingerprint(self, body, *, legacy=False):
+        request = body.model_dump(mode="json")
+        request.pop("expected_runtime_sha256", None)
+        if legacy:
+            request["timeout"] = body.timeout or self.settings.max_timeout_seconds
+        try:
+            raw = json.dumps(request, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
+        except (ValueError, TypeError):
+            raise HTTPException(400, "Analysis inputs must be finite JSON") from None
+        return hashlib.sha256(raw).hexdigest()
 
     def validate(self, body):
         request = body.model_dump(mode="json")
@@ -424,7 +450,7 @@ class AnalysisService:
                 or body.data_access.base_url not in self.settings.analysis_callback_urls
             ):
                 raise HTTPException(400, "Analysis callback URL is not configured")
-        return request, hashlib.sha256(raw).hexdigest()
+        return request, self.request_fingerprint(body)
 
     def response(self, receipt):
         response = dict(receipt["response"])
@@ -438,16 +464,26 @@ class AnalysisService:
         return response
 
     async def execute(self, body):
-        request, fingerprint = self.validate(body)
-        identity = request["execution_id"]
+        identity = str(body.execution_id)
+        fingerprint = self.request_fingerprint(body)
         try:
             receipt = self.store.load(identity)
         except FileNotFoundError:
+            expected = body.expected_runtime_sha256
+            if expected and expected.lower() != self.runtime.receipt()["runtime_sha256"]:
+                raise AnalysisRuntimeChanged from None
+            request, fingerprint = self.validate(body)
             receipt = dict(
                 fingerprint=fingerprint,
+                fingerprint_version=2,
                 expires=time.time() + RETENTION_SECONDS,
                 response=dict(
-                    execution_id=identity, status="running", stdout="", stderr="", exit_code=0
+                    execution_id=identity,
+                    status="running",
+                    stdout="",
+                    stderr="",
+                    exit_code=0,
+                    runtime=self.runtime.receipt(),
                 ),
             )
             try:
@@ -462,7 +498,10 @@ class AnalysisService:
                 task.add_done_callback(lambda _: self.tasks.pop(identity, None))
         if receipt["fingerprint"] is None:
             return self.response(receipt)
-        if receipt["fingerprint"] != fingerprint:
+        matches_legacy = "fingerprint_version" not in receipt and receipt[
+            "fingerprint"
+        ] == self.request_fingerprint(body, legacy=True)
+        if receipt["fingerprint"] != fingerprint and not matches_legacy:
             raise HTTPException(409, "Execution ID belongs to a different request")
         if identity in self.tasks:
             await asyncio.shield(self.tasks[identity])
@@ -518,6 +557,7 @@ class AnalysisService:
                     True,
                 ),
             )
+        response["runtime"] = receipt["response"].get("runtime", self.runtime.receipt())
         receipt["response"] = response
         try:
             self.store.save(identity, receipt)
@@ -535,6 +575,7 @@ class AnalysisService:
                     "Analysis result could not be retained within the storage limit",
                     True,
                 ),
+                runtime=response["runtime"],
             )
             self.store.save(identity, receipt)
 
@@ -583,7 +624,24 @@ def install_analysis_routes(app, settings, authenticated):
 
     @router.post("/execute")
     async def execute(body: AnalysisRequest):
-        return await service.execute(body)
+        try:
+            return await service.execute(body)
+        except AnalysisRuntimeChanged:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": failure(
+                        "infrastructure",
+                        "analysis_runtime_changed",
+                        "Analysis runtime changed; fetch the current runtime before execution",
+                    ),
+                    "runtime": service.runtime.receipt(),
+                },
+            )
+
+    @router.get("/runtime")
+    async def runtime():
+        return service.runtime.descriptor()
 
     @router.get("/executions/{execution_id}")
     async def status(execution_id: UUID):

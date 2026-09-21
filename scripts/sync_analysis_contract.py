@@ -13,7 +13,9 @@ TARGET = ROOT / "src/sandbox/contracts/analysis-execution.v1.json"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
-    parser.add_argument("--check", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--write", action="store_true", help="Write the contract copy (default)")
     args = parser.parse_args()
     content = args.source.read_text(encoding="utf-8").replace("\r\n", "\n")
     if args.check:

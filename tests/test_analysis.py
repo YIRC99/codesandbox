@@ -386,6 +386,7 @@ def test_packaged_contract_matches_routes_and_runtime(tmp_path):
     with client_for(tmp_path) as client:
         paths = client.get("/openapi.json").json()["paths"]
     for operation, method in {
+        "runtime": "get",
         "execute": "post",
         "status": "get",
         "cancel": "delete",

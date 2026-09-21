@@ -4,17 +4,105 @@ import ast
 import builtins
 import copy
 import errno
+import importlib.metadata
 import json
 import linecache
 import os
 import runpy
 import sys
+import sysconfig
 import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from urllib.parse import urlsplit
+
+ANALYSIS_SDK_VERSION = "1.0.0"
+BLOCKED_ANALYSIS_IMPORTS = frozenset(
+    {
+        "os",
+        "sys",
+        "pathlib",
+        "urllib",
+        "httpx",
+        "requests",
+        "yfinance",
+        "ast",
+        "types",
+        "traceback",
+        "io",
+        "builtins",
+        "matplotlib",
+        "seaborn",
+        "backtesting",
+        "pandas_ta",
+    }
+)
+
+
+def trusted_import_paths():
+    """Resolve installed dependencies without trusting cwd, PYTHONPATH or sys.path.
+
+    uv records overlay dependencies in the interpreter-owned .pth file. Parse only
+    literal site.addsitedir calls there; never execute .pth text or trust arbitrary
+    search paths. Installed distribution records also cover namespace/native libs.
+    """
+    sites = []
+    for name in ("purelib", "platlib"):
+        path = Path(sysconfig.get_path(name)).resolve()
+        if path not in sites:
+            sites.append(path)
+    for site_root in tuple(sites):
+        overlay = site_root / "_uv_ephemeral_overlay.pth"
+        if not overlay.is_file():
+            continue
+        tree = ast.parse(overlay.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "site"
+                and node.func.attr == "addsitedir"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                path = Path(node.args[0].value).resolve()
+                if path.name == "site-packages" and path.is_dir() and path not in sites:
+                    sites.append(path)
+
+    stdlib = Path(sysconfig.get_path("stdlib")).resolve()
+    standard = [stdlib, Path(sys.base_prefix, "DLLs").resolve()]
+    dynamic = sysconfig.get_config_var("DESTSHARED")
+    if dynamic:
+        standard.append(Path(dynamic).resolve())
+    # Windows and POSIX place the optional stdlib zip beside the stdlib directory.
+    archive = stdlib.parent / f"python{sys.version_info.major}{sys.version_info.minor}.zip"
+    standard.append(archive)
+    directories = {path for path in standard if path.is_dir()}
+    files = {path for path in standard if path.is_file()}
+    for site_root in sites:
+        for distribution in importlib.metadata.distributions(path=[str(site_root)]):
+            top_levels = {
+                record.parts[0]
+                for record in distribution.files or ()
+                if record.parts and record.parts[0] not in {".", ".."}
+            }
+            for top_level in top_levels:
+                path = (site_root / top_level).resolve()
+                if not path.is_relative_to(site_root):
+                    continue
+                if path.is_dir():
+                    directories.add(path)
+                elif path.is_file():
+                    files.add(path)
+    return (
+        [str(path) for path in dict.fromkeys(standard + sites)],
+        [str(path) for path in sorted(directories)],
+        [str(path) for path in sorted(files)],
+    )
 
 
 class DataAccessError(Exception):
@@ -55,7 +143,25 @@ def main():
     proxy_address = ("127.0.0.1", urlsplit(proxy_url).port) if proxy_url else None
     # Load the transport before restricting file access; no proxy/environment credentials.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    library_roots = [Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve()]
+    # Captured once by the trusted parent alongside the runtime source snapshot.
+    # The public request schema never accepts this internal import policy.
+    import_paths, library_directories, library_files = request["import_policy"]
+    sys.path[:] = import_paths
+    library_roots = [Path(path) for path in library_directories]
+    library_files = {Path(path) for path in library_files}
+    import_roots = {Path(path) for path in import_paths}
+
+    def library_readable(candidate):
+        if candidate in library_files:
+            return True
+        for root in library_roots:
+            if candidate.is_relative_to(root):
+                # A stdlib root can contain site-packages; only distribution-owned
+                # paths within it are readable, not every file in that directory.
+                relative = candidate.relative_to(root)
+                if "site-packages" not in relative.parts:
+                    return True
+        return False
 
     def audit(event, args):
         if event == "socket.connect" and (proxy_address is None or args[1] != proxy_address):
@@ -73,7 +179,7 @@ def main():
             candidate = Path(path).resolve()
             if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC):
                 raise PermissionError("Analysis file writes are not allowed")
-            if not any(candidate.is_relative_to(root) for root in library_roots):
+            if not library_readable(candidate):
                 raise PermissionError("Analysis may only read task inputs via context.data.read")
         if event in {
             "os.remove",
@@ -91,7 +197,7 @@ def main():
             # Imports may inspect library directories; they cannot read task/server files.
             if event in {"os.listdir", "os.scandir"} and args and isinstance(args[0], (str, bytes)):
                 candidate = Path(os.fsdecode(args[0])).resolve()
-                if any(candidate.is_relative_to(root) for root in library_roots):
+                if candidate in import_roots or library_readable(candidate):
                     return
             raise PermissionError("Filesystem mutation or inspection is not allowed")
 
@@ -171,8 +277,15 @@ def main():
                 True,
             ) from None
 
+    def reject_source(node, identifier, message):
+        # AST columns are UTF-8 byte offsets; show a one-based character column.
+        prefix = source.splitlines()[node.lineno - 1].encode("utf-8")[: node.col_offset]
+        column = len(prefix.decode("utf-8")) + 1
+        raise PermissionError(
+            f"{message}: {identifier!r} at analysis.py line {node.lineno}, column {column}"
+        )
+
     try:
-        policy["validate_script_ast"](script)
         tree = ast.parse(source, filename="analysis.py")
         blocked_names = {
             "eval",
@@ -189,20 +302,6 @@ def main():
             "breakpoint",
             "__import__",
         }
-        blocked_imports = {
-            "os",
-            "sys",
-            "pathlib",
-            "urllib",
-            "httpx",
-            "requests",
-            "yfinance",
-            "ast",
-            "types",
-            "traceback",
-            "io",
-            "builtins",
-        }
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and (
                 node.attr.startswith("_")
@@ -210,18 +309,20 @@ def main():
                 or node.attr
                 in {"os", "sys", "builtins", "modules", "format", "format_map", "environ"}
             ):
-                raise PermissionError("Private attribute access is not allowed")
+                reject_source(node, node.attr, "Private attribute access is not allowed")
             if isinstance(node, ast.Name) and (
                 node.id in blocked_names or node.id.startswith("__")
             ):
-                raise PermissionError("Unsafe builtin access is not allowed")
+                reject_source(node, node.id, "Unsafe builtin access is not allowed")
             imports = []
             if isinstance(node, ast.Import):
                 imports = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
                 imports = [node.module or ""]
-            if any(name.split(".")[0] in blocked_imports for name in imports):
-                raise PermissionError("Use context.data for analysis input access")
+            for name in imports:
+                if name.split(".")[0] in BLOCKED_ANALYSIS_IMPORTS:
+                    reject_source(node, name, "Import is not allowed by analysis policy")
+        policy["validate_script_ast"](script)
         compiled = compile(tree, "analysis.py", "exec")
         policy["install_audit_hook"]()
         policy["apply_resource_limits"]()

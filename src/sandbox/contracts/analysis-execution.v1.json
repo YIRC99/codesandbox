@@ -2,6 +2,7 @@
   "schema_version": "analysis-execution.v1",
   "description": "AI 编排端与沙箱分析执行的唯一接口约定；独立于固定回测协议。",
   "routes": {
+    "runtime": "/analysis/runtime",
     "execute": "/analysis/execute",
     "status": "/analysis/executions/{execution_id}",
     "cancel": "/analysis/executions/{execution_id}",
@@ -16,7 +17,8 @@
       "inputs": "object: dataset alias -> JSON dataset; default {}",
       "parameters": "object: analysis parameters; default {}",
       "data_access": "optional {base_url, token}; trusted AI callback, never provider credentials",
-      "timeout": "optional positive seconds bounded by sandbox execution limit"
+      "timeout": "optional positive seconds bounded by sandbox execution limit",
+      "expected_runtime_sha256": "optional SHA-256 from authenticated runtime descriptor; reject a new execution if runtime changed"
     }
   },
   "context": {
@@ -36,9 +38,23 @@
   "response": {
     "required": ["execution_id", "status", "stdout", "stderr", "exit_code"],
     "status": ["running", "success", "error", "timeout", "interrupted"],
-    "optional": ["result", "artifact", "error"],
+    "optional": ["result", "artifact", "error", "runtime"],
     "artifact": ["artifact_id", "filename", "size_bytes", "sha256", "expires_at"],
     "error": ["category", "code", "message", "retryable"]
+  },
+  "runtime_descriptor": {
+    "method": "GET",
+    "path": "/analysis/runtime",
+    "authentication": "same sandbox API key as analysis execution",
+    "required": ["schema_version", "runtime_sha256", "runner_source", "policy_source", "sdk_version", "python_version", "dependencies", "limits", "resource_enforcement"],
+    "schema_version": "analysis-runtime.v1",
+    "runtime_sha256": "SHA-256 of UTF-8 canonical JSON descriptor excluding runtime_sha256; sort_keys=true, ensure_ascii=false, separators=(',',':')",
+    "runner_source": "trusted analyze(context) runner/SDK source without runtime inputs, task tokens, credentials or absolute service paths",
+    "policy_source": "trusted runner.py source loaded by analysis runner; included in runtime hash and supplied to generation/repair so policy upgrades cannot silently change execution semantics",
+    "dependencies": "object of available analysis library names to actual installed versions",
+    "limits": "object including max_timeout_seconds and max_result_bytes",
+    "resource_enforcement": "platform and per-process setrlimit support with inherited hard caps; process_* in limits are configured values, not proof of OS enforcement; planned values reflect the smaller configured/inherited hard limits and are null where unsupported",
+    "receipt_runtime": "only runtime_sha256, sdk_version and python_version; descriptor retained in AI task request"
   },
   "defaults": {"inline_bytes": 2097152, "retention_hours": 24},
   "invariants": [
