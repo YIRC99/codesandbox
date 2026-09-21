@@ -65,9 +65,12 @@ def test_real_runtime_descriptor_source_versions_hash_and_auth(tmp_path):
         assert str(tmp_path) not in canonical
 
 
-def test_runtime_requires_configured_key(tmp_path):
+@pytest.mark.parametrize("headers", [{}, {"X-API-Key": "caller-key"}])
+def test_runtime_allows_requests_when_key_is_not_configured(tmp_path, headers):
     with client_for(tmp_path, api_key="") as client:
-        assert client.get("/analysis/runtime").status_code == 503
+        response = client.get("/analysis/runtime", headers=headers)
+        assert response.status_code == 200
+        assert response.json()["schema_version"] == "analysis-runtime.v1"
 
 
 def test_policy_only_upgrade_changes_runtime_and_exposes_exact_policy(tmp_path, monkeypatch):

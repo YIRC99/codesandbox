@@ -61,15 +61,16 @@ def test_actual_result_survives_cleanup_and_same_id_reuses(tmp_path):
         )
 
 
-def test_large_result_download_auth_release(tmp_path):
+@pytest.mark.parametrize("api_key", ["test-key", ""])
+def test_large_result_download_auth_release(tmp_path, api_key):
     request = body("def analyze(context):\n    return {'data': 'x' * 2100000}")
-    with client_for(tmp_path) as client:
+    with client_for(tmp_path, api_key=api_key) as client:
         result = client.post("/analysis/execute", json=request, headers=HEADERS).json()
         assert result["status"] == "success"
         assert "result" not in result
         artifact = result["artifact"]
         url = f"/analysis/results/{artifact['artifact_id']}"
-        assert client.get(url).status_code == 401
+        assert client.get(url).status_code == (401 if api_key else 200)
         download = client.get(url, headers=HEADERS)
         assert download.status_code == 200
         assert len(download.content) == artifact["size_bytes"]
@@ -353,9 +354,39 @@ def test_explicit_cancel_stops_child_and_keeps_receipt(tmp_path):
         assert client.get(url, headers=HEADERS).json() == cancelled.json()
 
 
-def test_analysis_requires_configured_auth(tmp_path):
+def test_analysis_executes_without_configured_key(tmp_path):
     with client_for(tmp_path, api_key="") as client:
-        assert client.post("/analysis/execute", json=body()).status_code == 503
+        request = body()
+        response = client.post("/analysis/execute", json=request)
+        assert response.status_code == 200
+        assert response.json()["status"] == "success"
+        assert response.json()["result"] == [1, 2]
+        url = f"/analysis/executions/{request['execution_id']}"
+        assert client.get(url).json()["status"] == "success"
+        assert client.delete(url).status_code == 200
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-API-Key": "wrong"}])
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("GET", "/analysis/runtime"),
+        ("POST", "/analysis/execute"),
+        ("GET", "/analysis/executions/{id}"),
+        ("DELETE", "/analysis/executions/{id}"),
+        ("GET", "/analysis/results/{id}"),
+        ("DELETE", "/analysis/results/{id}"),
+    ],
+)
+def test_configured_key_protects_all_analysis_routes(tmp_path, headers, method, path):
+    with client_for(tmp_path) as client:
+        response = client.request(
+            method,
+            path.format(id=uuid4()),
+            headers=headers,
+            **({"json": body()} if method == "POST" else {}),
+        )
+        assert response.status_code == 401
 
 
 def test_full_storage_rejects_admission(tmp_path):

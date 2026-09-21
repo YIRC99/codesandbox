@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from starlette.responses import FileResponse, JSONResponse, Response
 
@@ -614,13 +614,7 @@ def install_analysis_routes(app, settings, authenticated):
     service = AnalysisService(settings, app.state.gate)
     app.state.analysis = service
 
-    async def require_configured_key():
-        if not settings.api_key:
-            raise HTTPException(503, "Analysis requires a configured sandbox API key")
-
-    router = APIRouter(
-        prefix="/analysis", dependencies=[authenticated, Depends(require_configured_key)]
-    )
+    router = APIRouter(prefix="/analysis", dependencies=[authenticated])
 
     @router.post("/execute")
     async def execute(body: AnalysisRequest):

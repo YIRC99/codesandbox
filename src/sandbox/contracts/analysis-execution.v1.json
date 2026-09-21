@@ -45,7 +45,7 @@
   "runtime_descriptor": {
     "method": "GET",
     "path": "/analysis/runtime",
-    "authentication": "same sandbox API key as analysis execution",
+    "authentication": "All /analysis routes use optional X-API-Key authentication: when SANDBOX_API_KEY is nonempty require an exact match (missing or incorrect returns 401); when unset or empty skip API key validation. Task callback tokens and callback URL allowlists remain required independently.",
     "required": ["schema_version", "runtime_sha256", "runner_source", "policy_source", "sdk_version", "python_version", "dependencies", "limits", "resource_enforcement"],
     "schema_version": "analysis-runtime.v1",
     "runtime_sha256": "SHA-256 of UTF-8 canonical JSON descriptor excluding runtime_sha256; sort_keys=true, ensure_ascii=false, separators=(',',':')",

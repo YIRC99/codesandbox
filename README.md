@@ -127,7 +127,7 @@ Linux 资源信号退出先于结果 JSON 解析处理：CPU/文件限额分别�
 `analysis_file_limit`，其他信号终止返回基础设施错误 `analysis_process_terminated`，
 不会因遗留空结果文件误报代码 JSON 错误。Windows 回归使用模拟 Linux 退出码验证分类，未实测 Linux 信号。
 
-接口统一使用 `X-API-Key`；分析能力在 `SANDBOX_API_KEY` 为空时返回 503，旧回测行为不变。
+分析接口与普通执行接口统一使用可选 `X-API-Key` 鉴权：配置了非空 `SANDBOX_API_KEY` 时必须匹配，缺失或错误返回 401；环境变量未设置或为空时跳过 Key 校验，不再返回 503。该规则覆盖运行时查询、执行、状态、取消、结果下载和释放。任务取数的回调令牌及精确 URL 白名单仍独立校验。
 
 | 方法与路径 | 行为 |
 | --- | --- |
